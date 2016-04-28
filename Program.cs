@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Threading;
 using Pudge;
 using Pudge.Player;
@@ -7,6 +8,7 @@ namespace PudgeClient
 {
     class Program
     {
+        private const double TurnAngleThreshold = 10;
         const string CvarcTag = "Получи кварк-тэг на сайте";
 
         // Пример визуального отображения данных с сенсоров при отладке.
@@ -37,9 +39,29 @@ namespace PudgeClient
         static void Main(string[] args)
         {
             if (args.Length == 0)
-                args = new[] {"127.0.0.1", "14000"};
+                args = new[] { "127.0.0.1", "14000" };
             var ip = args[0];
             var port = int.Parse(args[1]);
+
+            Node previousNode = null;
+            //foreach (var node in World.Nodes.OrderByDescending(c => c.Y).ThenBy(c => c.X))
+            //{
+            //    if (previousNode != null && node.Y < previousNode.Y)
+            //    {
+            //        Console.WriteLine();
+            //    }
+            //    if (node.IsWalkable)
+            //    {
+            //        Console.Write("·");
+            //    }
+            //    else
+            //    {
+            //        Console.Write("†");
+            //    }
+
+            //    previousNode = node;
+            //}
+            Console.WriteLine();
 
             while (true)
             {
@@ -55,54 +77,121 @@ namespace PudgeClient
                 // speedUp -- ускорение отладки в два раза. Может вызывать снижение FPS на слабых машинах
                 var sensorData = client.Configurate(ip, port, CvarcTag);
 
-                // Пудж узнает о всех событиях, происходящих в мире, с помощью сенсоров.
-                // Для передачи и представления данных с сенсоров служат объекты класса PudgeSensorsData.
-                Print(sensorData);
+                var targetNode = World.GetNode(0, 90);
 
-                // Каждое действие возвращает новые данные с сенсоров.
-                sensorData = client.Move();
-                Print(sensorData);
+                while (true)
+                {
+                    Print(sensorData);
+                    var nodeX = sensorData.SelfLocation.X;
+                    var nodeY = sensorData.SelfLocation.Y;
 
-                // Для удобства, можно подписать свой метод на обработку всех входящих данных с сенсоров.
-                // С этого момента любое действие приведет к отображению в консоли всех данных
-                client.SensorDataReceived += Print;
+                    var currentNode = World.GetNode(nodeX, nodeY);
 
-                // Угол поворота указывается в градусах, против часовой стрелки.
-                // Для поворота по часовой стрелке используйте отрицательные значения.
-                client.Rotate(-42);
+                    if (currentNode == targetNode)
+                    {
+                        sensorData = client.Wait(Strategy.DefaultWaitTime);
+                        continue;
+                    }
 
-                client.Move(25);
-                client.Move(25);
-                client.Move(25);
+                    var path = AStar.FindPath(currentNode, targetNode,
+                        (previous, possibleNext) => Distance(previous, possibleNext),
+                        (current, destination) => Heuristic(current, destination))?.ToList();
 
-                client.Rotate(30);
+                    if (path == null)
+                    {
+                        sensorData = client.Wait(Strategy.DefaultWaitTime);
+                        continue;
+                    }
 
-                client.Move(25);
-                client.Move(25);
-                client.Move(25);
-                client.Wait(0.25);
-                client.Wait(0.25);
+                    if (path.Count < 2)
+                    {
+                        sensorData = client.Wait(Strategy.DefaultWaitTime);
+                        continue;
+                    }
+                        
+                    var nextNode = path[path.Count - 2];
+                    var turnAngle = CalculateTurnAngle(currentNode, nextNode, sensorData.SelfLocation.Angle);
 
+                    if (Math.Abs(turnAngle) > TurnAngleThreshold)
+                    {
+                        sensorData = client.Rotate(turnAngle);
+                        // wait rotation
+                        client.Wait(Math.Abs(turnAngle/PudgeRules.Current.RotationVelocity));
+                    }
+                    else
+                    {
+                        sensorData = client.Move(Strategy.DefaultStepSize);
+                    }
+                }
 
-                // Так можно хукать.
-                //client.Hook();
-
-                client.Rotate(-35);
-
-                client.Wait(0.5);
-                client.Wait(0.5);
-
-                client.Hook();
-
-                // Пример длинного движения. Move(100) лучше не писать. Мало ли что произойдет за это время ;) 
-                //for (int i = 0; i < 5; i++)
-                //    client.Move(15);
                 client.Wait(1);
                 // Корректно завершаем работу
                 client.Exit();
 
                 Thread.Sleep(1000);
             }
+        }
+
+        private static double CalculateTurnAngle(Node currentNode, Node targetNode, double currentAngle)
+        {
+            //return 0;
+            var xChange = currentNode.X - targetNode.X;
+            var yChange = currentNode.Y - targetNode.Y;
+
+            var targetAngle = 0;
+
+            if (xChange == 0 && yChange == 0) return 0;
+
+            if (xChange == 0)
+            {
+                if (yChange < 0)
+                    targetAngle = 0;
+                else
+                    targetAngle = 180;
+            }
+            else if (yChange == 0)
+            {
+                if (xChange < 0)
+                    targetAngle = 90;
+                else
+                    targetAngle = -90;
+            }
+
+            else if (xChange < 0 && yChange < 0)
+                targetAngle = 45;
+
+            else if (xChange < 0 && yChange > 0)
+                targetAngle = 135;
+
+            else if(xChange > 0 && yChange < 0)
+                targetAngle = 135;
+
+            else if(xChange > 0 && yChange > 0)
+                targetAngle = -135;
+
+            return targetAngle - currentAngle;
+        }
+
+        private static double Distance(Node currentNode, Node targetNode)
+        {
+            const int diagonalCost = 14;
+            const int straightCost = 10;
+
+            if (currentNode.X == targetNode.X ^ currentNode.Y == targetNode.Y)
+            {
+                return straightCost;
+            }
+
+            return diagonalCost;
+        }
+
+        private static double Heuristic(Node current, Node target)
+        {
+            var xDistance = Math.Abs(current.X - target.X);
+            var yDistance = Math.Abs(current.Y - target.Y);
+            if (xDistance > yDistance)
+                return 14 * yDistance + 10 * (xDistance - yDistance);
+            return 14 * xDistance + 10 * (yDistance - xDistance);
         }
     }
 }
